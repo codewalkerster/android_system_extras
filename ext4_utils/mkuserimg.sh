@@ -45,7 +45,7 @@ if [ -z $MOUNT_POINT ]; then
 fi
 
 if [ -z $SIZE ]; then
-    SIZE=1024M
+    SIZE=128M
 fi
 
 if [ -n "$FC" ]; then
