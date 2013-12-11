@@ -46,6 +46,7 @@ struct selabel_handle;
 
 extern struct fs_info info;
 
+#include "system_chksum.h"
 
 static void usage(char *path)
 {
@@ -149,7 +150,8 @@ int main(int argc, char **argv)
 		}
 	}
 
-#if !defined(HOST)
+#if !defined(BUILD_MAKE_EXT4FS_HOST_LINUX)
+#ifndef USE_MINGW
 	// Use only if -S option not requested
 	if (!sehnd && mountpoint) {
 		sehnd = selinux_android_file_context_handle();
@@ -159,6 +161,7 @@ int main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 	}
+#endif
 #endif
 
 	if (wipe && sparse) {
@@ -200,6 +203,27 @@ int main(int argc, char **argv)
 		fd = STDOUT_FILENO;
 	}
 
+#ifdef USE_MINGW
+        //load linklist from special file
+        recordMountPoint(mountpoint);
+        char *linklist = search_linklist_file(directory);
+        load_linklist_from_file( linklist );
+        free(linklist);
+        //dump_linklist();
+#endif
+
+//gen check sum
+#if defined(BUILD_MAKE_EXT4FS_HOST)
+	set_checksum_list_path(directory);
+	set_root_dir(directory);
+	rm_chksum_file();	
+	create_checksum_list(directory, mountpoint);	
+#ifdef USE_MINGW
+	create_link_chksum();
+#endif
+#endif
+	printf("make ext4fs main filename:%s, directory:%s, mountpoint:%s\n", filename, directory, mountpoint);
+	
 	exitcode = make_ext4fs_internal(fd, directory, mountpoint, fs_config_func, gzip,
 			sparse, crc, wipe, sehnd, verbose);
 	close(fd);

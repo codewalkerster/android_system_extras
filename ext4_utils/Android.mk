@@ -3,6 +3,8 @@
 LOCAL_PATH:= $(call my-dir)
 
 libext4_utils_src_files := \
+    ext4_dirent.c \
+    ext4_scandir.cpp \
     make_ext4fs.c \
     ext4fixup.c \
     ext4_utils.c \
@@ -14,6 +16,7 @@ libext4_utils_src_files := \
     sha1.c \
     wipe.c \
     crc16.c
+    
 
 #
 # -- All host/targets including windows
@@ -32,18 +35,23 @@ include $(BUILD_HOST_STATIC_LIBRARY)
 
 
 include $(CLEAR_VARS)
-LOCAL_SRC_FILES := make_ext4fs_main.c
+LOCAL_SRC_FILES := make_ext4fs_main.c \
+    system_chksum.c
 LOCAL_MODULE := make_ext4fs
+LOCAL_C_INCLUDES := bionic/libc/bionic
 LOCAL_STATIC_LIBRARIES += \
     libext4_utils_host \
     libsparse_host \
-    libz
+    libz \
+    libcrypto_static
 ifeq ($(HOST_OS),windows)
   LOCAL_LDLIBS += -lws2_32
+  LOCAL_SRC_FILES += linklist.c
 else
   LOCAL_STATIC_LIBRARIES += libselinux
-  LOCAL_CFLAGS := -DHOST
+  LOCAL_CFLAGS := -DBUILD_MAKE_EXT4FS_HOST_LINUX
 endif
+LOCAL_CFLAGS += -DBUILD_MAKE_EXT4FS_HOST
 include $(BUILD_HOST_EXECUTABLE)
 
 

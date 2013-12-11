@@ -37,7 +37,8 @@
 #include "xattr.h"
 
 #ifdef USE_MINGW
-#define S_IFLNK 0  /* used by make_link, not needed under mingw */
+//#define S_IFLNK 0  /* used by make_link, not needed under mingw */
+#define S_IFLNK 0120000
 #endif
 
 static u32 dentry_size(u32 entries, struct dentry *dentries)

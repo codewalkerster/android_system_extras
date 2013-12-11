@@ -34,46 +34,13 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#ifdef USE_MINGW
-
-#include <winsock2.h>
-
-/* These match the Linux definitions of these flags.
-   L_xx is defined to avoid conflicting with the win32 versions.
-*/
-#define L_S_IRUSR 00400
-#define L_S_IWUSR 00200
-#define L_S_IXUSR 00100
-#define S_IRWXU (L_S_IRUSR | L_S_IWUSR | L_S_IXUSR)
-#define S_IRGRP 00040
-#define S_IWGRP 00020
-#define S_IXGRP 00010
-#define S_IRWXG (S_IRGRP | S_IWGRP | S_IXGRP)
-#define S_IROTH 00004
-#define S_IWOTH 00002
-#define S_IXOTH 00001
-#define S_IRWXO (S_IROTH | S_IWOTH | S_IXOTH)
-#define S_ISUID 0004000
-#define S_ISGID 0002000
-#define S_ISVTX 0001000
-
-#else
-
-#include <selinux/selinux.h>
-#include <selinux/label.h>
-#include <selinux/android.h>
-
-#define O_BINARY 0
-
-#endif
-
 /* TODO: Not implemented:
    Allocating blocks in the same block group as the file inode
    Hash or binary tree directories
    Special files: sockets, devices, fifos
  */
 
-static int filter_dot(const struct dirent *d)
+int filter_dot(const struct dirent *d)
 {
 	return (strcmp(d->d_name, "..") && strcmp(d->d_name, "."));
 }
@@ -99,7 +66,13 @@ static u32 build_default_directory_structure()
 	return root_inode;
 }
 
-#ifndef USE_MINGW
+
+#ifdef USE_MINGW
+int alphasort(const struct dirent** a, const struct dirent** b) {
+  return strcoll((*a)->d_name, (*b)->d_name);
+}
+#endif
+
 /* Read a local directory and create the same tree in the generated filesystem.
    Calls itself recursively with each directory in the given directory.
    full_path is an absolute or relative path, with a trailing slash, to the
@@ -114,7 +87,7 @@ static u32 build_directory_structure(const char *full_path, const char *dir_path
 	int entries = 0;
 	struct dentry *dentries;
 	struct dirent **namelist = NULL;
-	struct stat stat;
+	struct stat f_stat;
 	int ret;
 	int i;
 	u32 inode;
@@ -122,8 +95,14 @@ static u32 build_directory_structure(const char *full_path, const char *dir_path
 	u32 dirs = 0;
 	bool needs_lost_and_found = false;
 
+    //printf("full_path:%s, dir_path:%s\n", full_path, dir_path);
+    
 	if (full_path) {
+#ifdef USE_MINGW
+		entries = ext4_scandir(full_path, &namelist, filter_dot, (void*)alphasort);
+#else
 		entries = scandir(full_path, &namelist, filter_dot, (void*)alphasort);
+#endif
 		if (entries < 0) {
 			error_errno("scandir");
 			return EXT4_ALLOCATE_FAILED;
@@ -148,29 +127,47 @@ static u32 build_directory_structure(const char *full_path, const char *dir_path
 		if (dentries[i].filename == NULL)
 			critical_error_errno("strdup");
 
+        //printf("dir_path:%s, full_path:%s, d_name:%s\n", dir_path, full_path, namelist[i]->d_name);
+
+        
+    #ifndef USE_MINGW
 		asprintf(&dentries[i].path, "%s%s", dir_path, namelist[i]->d_name);
 		asprintf(&dentries[i].full_path, "%s%s", full_path, namelist[i]->d_name);
+    #else
+        int dir_len = strlen(dir_path);
+        int full_len = strlen(full_path);
+        int name_len = strlen(namelist[i]->d_name);
+
+        dentries[i].path = (char *)malloc(dir_len + name_len + 2);
+        dentries[i].full_path = (char *)malloc(full_len + name_len + 2);
+        sprintf(dentries[i].path, "%s%s", dir_path, namelist[i]->d_name);
+		sprintf(dentries[i].full_path, "%s%s", full_path, namelist[i]->d_name);
+    #endif
 
 		free(namelist[i]);
 
-		ret = lstat(dentries[i].full_path, &stat);
+#ifdef USE_MINGW
+        	ret = stat(dentries[i].full_path, &f_stat);
+#else
+		ret = lstat(dentries[i].full_path, &f_stat);
+#endif
 		if (ret < 0) {
-			error_errno("lstat");
+			error_errno("lstat path:%s", dentries[i].full_path);
 			i--;
 			entries--;
 			continue;
 		}
 
-		dentries[i].size = stat.st_size;
-		dentries[i].mode = stat.st_mode & (S_ISUID|S_ISGID|S_ISVTX|S_IRWXU|S_IRWXG|S_IRWXO);
-		dentries[i].mtime = stat.st_mtime;
+		dentries[i].size = f_stat.st_size;
+		dentries[i].mode = f_stat.st_mode & (S_ISUID|S_ISGID|S_ISVTX|S_IRWXU|S_IRWXG|S_IRWXO);
+		dentries[i].mtime = f_stat.st_mtime;
 		uint64_t capabilities;
 		if (fs_config_func != NULL) {
 #ifdef ANDROID
 			unsigned int mode = 0;
 			unsigned int uid = 0;
 			unsigned int gid = 0;
-			int dir = S_ISDIR(stat.st_mode);
+			int dir = S_ISDIR(f_stat.st_mode);
 			fs_config_func(dentries[i].path, dir, &uid, &gid, &mode, &capabilities);
 			dentries[i].mode = mode;
 			dentries[i].uid = uid;
@@ -182,7 +179,7 @@ static u32 build_directory_structure(const char *full_path, const char *dir_path
 		}
 #ifndef USE_MINGW
 		if (sehnd) {
-			if (selabel_lookup(sehnd, &dentries[i].secon, dentries[i].path, stat.st_mode) < 0) {
+			if (selabel_lookup(sehnd, &dentries[i].secon, dentries[i].path, f_stat.st_mode) < 0) {
 				error("cannot lookup security context for %s", dentries[i].path);
 			}
 
@@ -191,28 +188,37 @@ static u32 build_directory_structure(const char *full_path, const char *dir_path
 		}
 #endif
 
-		if (S_ISREG(stat.st_mode)) {
+		if (S_ISREG(f_stat.st_mode)) {
 			dentries[i].file_type = EXT4_FT_REG_FILE;
-		} else if (S_ISDIR(stat.st_mode)) {
+#ifdef USE_MINGW
+			if( !strcmp(LINK_LIST_FILE_NAME, dentries[i].filename) ) {
+				printf("is linklist file,skip, dir_path:%s, dentries[i].filename:%s\n", dir_path, dentries[i].filename );
+				continue;
+			}			
+#endif
+		} else if (S_ISDIR(f_stat.st_mode)) {
 			dentries[i].file_type = EXT4_FT_DIR;
 			dirs++;
-		} else if (S_ISCHR(stat.st_mode)) {
+		} else if (S_ISCHR(f_stat.st_mode)) {
 			dentries[i].file_type = EXT4_FT_CHRDEV;
-		} else if (S_ISBLK(stat.st_mode)) {
+		} else if (S_ISBLK(f_stat.st_mode)) {
 			dentries[i].file_type = EXT4_FT_BLKDEV;
-		} else if (S_ISFIFO(stat.st_mode)) {
+		} else if (S_ISFIFO(f_stat.st_mode)) {
 			dentries[i].file_type = EXT4_FT_FIFO;
-		} else if (S_ISSOCK(stat.st_mode)) {
+		} else if (S_ISSOCK(f_stat.st_mode)) {
 			dentries[i].file_type = EXT4_FT_SOCK;
-		} else if (S_ISLNK(stat.st_mode)) {
+		} else if (S_ISLNK(f_stat.st_mode)) {
+		#ifndef USE_MINGW
 			dentries[i].file_type = EXT4_FT_SYMLINK;
 			dentries[i].link = calloc(info.block_size, 1);
 			readlink(dentries[i].full_path, dentries[i].link, info.block_size - 1);
+		#endif
 		} else {
 			error("unknown file type on %s", dentries[i].path);
 			i--;
 			entries--;
 		}
+        //printf("dentries[%d].path:%s\n", i, dentries[i].path);
 	}
 	free(namelist);
 
@@ -224,35 +230,118 @@ static u32 build_directory_structure(const char *full_path, const char *dir_path
 		dentries = tmp;
 
 		dentries[0].filename = strdup("lost+found");
+    #ifndef USE_MINGW
 		asprintf(&dentries[0].path, "%slost+found", dir_path);
+    #else
+        int dir_len = strlen(dir_path) + strlen("slost+found");
+
+        dentries[0].path = (char *)malloc(dir_len + 2);
+        sprintf(dentries[0].path, "%slost+found", dir_path);
+    #endif
 		dentries[0].full_path = NULL;
 		dentries[0].size = 0;
 		dentries[0].mode = S_IRWXU;
 		dentries[0].file_type = EXT4_FT_DIR;
 		dentries[0].uid = 0;
 		dentries[0].gid = 0;
+    #ifndef USE_MINGW
 		if (sehnd) {
 			if (selabel_lookup(sehnd, &dentries[0].secon, dentries[0].path, dentries[0].mode) < 0)
 				error("cannot lookup security context for %s", dentries[0].path);
 		}
+    #endif
 		entries++;
 		dirs++;
 	}
 
+#ifdef USE_MINGW
+
+#if 0
+	//test create link
+	 if (needs_lost_and_found){
+                struct dentry *tmp = calloc(entries + 1, sizeof(struct dentry));
+                memset(tmp, 0, sizeof(struct dentry));
+                memcpy(tmp + 1, dentries, entries * sizeof(struct dentry));
+                dentries = tmp;
+
+                dentries[0].filename = strdup("test123456");
+                dentries[0].path = strdup("/system/bin/test123456");
+                dentries[0].full_path = NULL;
+                dentries[0].size = 0;
+                dentries[0].mode = S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
+                dentries[0].file_type = EXT4_FT_SYMLINK;
+                dentries[0].uid = 0;
+                dentries[0].gid = 0;
+		dentries[0].mtime = 0,
+                dentries[0].link = strdup("/system/bin/toolbox"),
+                entries++;
+        }
+#endif
+
+	//create link node with dir match
+	XLink* plink = getLinkList();
+	while( plink ) {
+		if( !strcmp( plink->dir, dir_path ) ) {
+			struct dentry *tmp = calloc(entries + 1, sizeof(struct dentry));
+            memset(tmp, 0, sizeof(struct dentry));
+            memcpy(tmp + 1, dentries, entries * sizeof(struct dentry));
+            dentries = tmp;
+
+			dentries[0].filename = strdup(plink->linkname);			
+			int dir_len = strlen(dir_path) + strlen(plink->linkname);
+        	dentries[0].path = (char *)malloc(dir_len + 1);
+        	sprintf(dentries[0].path, "%s%s", dir_path, plink->linkname);
+            dentries[0].full_path = NULL;
+            dentries[0].size = 0;
+            //dentries[0].mode = S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
+            dentries[0].mode = plink->mode;
+            dentries[0].file_type = EXT4_FT_SYMLINK;
+            dentries[0].uid = plink->uid;
+            dentries[0].gid = plink->gid;
+			dentries[0].mtime = 0,
+            dentries[0].link = strdup(plink->linktarget),
+            entries++;
+
+			/*printf("create link node with dir match plink->dir:%s, plink->linkname:%s, \
+				plink->linktarget:%s\n", plink->dir, plink->linkname, plink->linktarget);*/
+		}
+		plink = plink->pNext;
+	}
+#endif
+
 	inode = make_directory(dir_inode, entries, dentries, dirs);
 
 	for (i = 0; i < entries; i++) {
+        //printf("dentries[%d] file_type:%d\n", i, dentries[i].file_type);
+        
 		if (dentries[i].file_type == EXT4_FT_REG_FILE) {
 			entry_inode = make_file(dentries[i].full_path, dentries[i].size);
 		} else if (dentries[i].file_type == EXT4_FT_DIR) {
 			char *subdir_full_path = NULL;
 			char *subdir_dir_path;
 			if (dentries[i].full_path) {
-				ret = asprintf(&subdir_full_path, "%s/", dentries[i].full_path);
+				
+            #ifndef USE_MINGW
+        		ret = asprintf(&subdir_full_path, "%s/", dentries[i].full_path);
+            #else
+                int full_len = strlen(dentries[i].full_path) + strlen("/");
+
+                subdir_full_path = (char *)malloc(full_len + 2);
+                ret = sprintf(subdir_full_path, "%s/", dentries[i].full_path);
+            #endif
 				if (ret < 0)
 					critical_error_errno("asprintf");
 			}
-			ret = asprintf(&subdir_dir_path, "%s/", dentries[i].path);
+
+        #ifndef USE_MINGW
+        	ret = asprintf(&subdir_dir_path, "%s/", dentries[i].path);
+        #else
+            int sub_len = strlen(dentries[i].path) + strlen("/");
+
+            subdir_dir_path = (char *)malloc(sub_len + 2);
+            ret = sprintf(subdir_dir_path, "%s/", dentries[i].path);
+        #endif
+
 			if (ret < 0)
 				critical_error_errno("asprintf");
 			entry_inode = build_directory_structure(subdir_full_path,
@@ -260,6 +349,7 @@ static u32 build_directory_structure(const char *full_path, const char *dir_path
 			free(subdir_full_path);
 			free(subdir_dir_path);
 		} else if (dentries[i].file_type == EXT4_FT_SYMLINK) {
+		    //printf("make link :%s\n", dentries[i].link);
 			entry_inode = make_link(dentries[i].link);
 		} else {
 			error("unknown file type on %s", dentries[i].path);
@@ -297,7 +387,6 @@ static u32 build_directory_structure(const char *full_path, const char *dir_path
 	free(dentries);
 	return inode;
 }
-#endif
 
 static u32 compute_block_size()
 {
@@ -402,7 +491,7 @@ int make_ext4fs(const char *filename, long long len,
    is guaranteed to have a trailing slash.  If absolute is true, the new string
    is also guaranteed to have a leading slash.
 */
-static char *canonicalize_slashes(const char *str, bool absolute)
+char *canonicalize_slashes(const char *str, bool absolute)
 {
 	char *ret;
 	int len = strlen(str);
@@ -416,9 +505,23 @@ static char *canonicalize_slashes(const char *str, bool absolute)
 	if (str[0] != '/' && absolute) {
 		newlen++;
 	}
+
+#ifdef USE_MINGW
+    if(absolute){
+        if (str[len - 1] != '/') {
+    		newlen++;
+    	}
+    }
+    else{
+        if (str[len - 1] != '\\') {
+    		newlen++;
+    	}
+    }
+#else
 	if (str[len - 1] != '/') {
 		newlen++;
 	}
+#endif
 	ret = malloc(newlen + 1);
 	if (!ret) {
 		critical_error("malloc");
@@ -432,9 +535,22 @@ static char *canonicalize_slashes(const char *str, bool absolute)
 	strcpy(ptr, str);
 	ptr += len;
 
-	if (str[len - 1] != '/') {
+#ifdef USE_MINGW
+    if(absolute){
+        if (str[len - 1] != '/') {
+    		*ptr++ = '/';
+    	}
+    }
+    else{
+        if (str[len - 1] != '\\') {
+    		*ptr++ = '\\';
+    	}
+    }  
+#else
+    if (str[len - 1] != '/') {
 		*ptr++ = '/';
 	}
+#endif
 
 	if (ptr != ret + newlen) {
 		critical_error("assertion failed\n");
@@ -445,12 +561,12 @@ static char *canonicalize_slashes(const char *str, bool absolute)
 	return ret;
 }
 
-static char *canonicalize_abs_slashes(const char *str)
+char *canonicalize_abs_slashes(const char *str)
 {
 	return canonicalize_slashes(str, true);
 }
 
-static char *canonicalize_rel_slashes(const char *str)
+char *canonicalize_rel_slashes(const char *str)
 {
 	return canonicalize_slashes(str, false);
 }
@@ -477,6 +593,8 @@ int make_ext4fs_internal(int fd, const char *_directory,
 	if (_directory) {
 		directory = canonicalize_rel_slashes(_directory);
 	}
+
+	printf("make_ext4fs_internal _directory:%s directory:%s\n", _directory, directory);
 
 	if (info.len <= 0)
 		info.len = get_file_size(fd);
@@ -560,17 +678,17 @@ int make_ext4fs_internal(int fd, const char *_directory,
 	if (info.feat_compat & EXT4_FEATURE_COMPAT_RESIZE_INODE)
 		ext4_create_resize_inode();
 
-#ifdef USE_MINGW
+//#ifdef USE_MINGW
 	// Windows needs only 'create an empty fs image' functionality
-	assert(!directory);
-	root_inode_num = build_default_directory_structure();
-#else
+//	assert(!directory);
+//	root_inode_num = build_default_directory_structure();
+//#else
 	if (directory)
 		root_inode_num = build_directory_structure(directory, mountpoint, 0,
                         fs_config_func, sehnd, verbose);
 	else
 		root_inode_num = build_default_directory_structure();
-#endif
+//#endif
 
 	root_mode = S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
 	inode_set_permissions(root_inode_num, root_mode, 0, 0, 0);
@@ -612,6 +730,10 @@ int make_ext4fs_internal(int fd, const char *_directory,
 
 	free(mountpoint);
 	free(directory);
+
+#ifdef USE_MINGW
+	clean_linklist();
+#endif
 
 	return 0;
 }
