@@ -22,7 +22,9 @@ def get_verity_metadata_size(data_size):
 
 def build_metadata_block(verity_table, signature):
     table_len = len(verity_table)
-    block = struct.pack("II256sI", MAGIC_NUMBER, VERSION, signature, table_len)
+    block = struct.pack("II", MAGIC_NUMBER, VERSION)
+    block += signature
+    block += struct.pack("I", table_len)
     block += verity_table
     block = block.ljust(METADATA_SIZE, '\x00')
     return block
