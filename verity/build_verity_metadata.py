@@ -62,6 +62,8 @@ def build_verity_metadata(data_blocks, metadata_image, root_hash,
     # write it to the outfile
     with open(metadata_image, "wb") as f:
         f.write(metadata_block)
+    with open(metadata_image + ".tab", "wb") as f:
+        f.write(verity_table)
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "-s":
