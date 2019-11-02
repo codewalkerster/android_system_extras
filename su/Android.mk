@@ -3,6 +3,11 @@ include $(CLEAR_VARS)
 
 LOCAL_CFLAGS := -Wall -Werror
 
+ifeq ($(TARGET_BUILD_VARIANT),userdebug)
+    LOCAL_DEX_PREOPT:=false
+    LOCAL_CFLAGS += -DCUSTOM_ROOT
+endif
+
 LOCAL_SRC_FILES:= su.cpp
 
 LOCAL_MODULE:= su
